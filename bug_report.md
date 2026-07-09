@@ -245,3 +245,51 @@
 +    revoke_access_token(data)   # invalidate before returning new tokens
      return { "access_token": ..., "refresh_token": ..., ... }
 ```
+
+---
+
+## Bug 16 — AI Trap: `_pricing_warmup()` TOCTOU Race Condition in `_has_conflict`
+
+- **File:** `app/routers/bookings.py`
+- **What the bug was:** A `time.sleep(0.12)` was placed inside `_pricing_warmup()`, which was called right after fetching existing bookings and just before checking for overlaps. This created a Time-of-Check to Time-of-Use (TOCTOU) race condition. Two concurrent booking requests for the same room and time could both read the DB, sleep, and then both pass the conflict check, resulting in a double-booking (violates Rule 3).
+- **How it was fixed:** Removed the `_pricing_warmup()` function and its call completely.
+
+---
+
+## Bug 17 — AI Trap: `_quota_audit()` TOCTOU Race Condition in `_check_quota`
+
+- **File:** `app/routers/bookings.py`
+- **What the bug was:** A `time.sleep(0.1)` inside `_quota_audit()` was called after counting a user's active bookings but before committing the new booking. Two concurrent requests could both count 2 active bookings, sleep, and then both commit, leaving the user with 4 bookings instead of the quota limit of 3 (violates Rule 4).
+- **How it was fixed:** Removed the `_quota_audit()` function and its call completely.
+
+---
+
+## Bug 18 — AI Trap: `_settlement_pause()` TOCTOU Race Condition in `cancel_booking`
+
+- **File:** `app/routers/bookings.py`
+- **What the bug was:** A `time.sleep(0.12)` inside `_settlement_pause()` was called after writing the `RefundLog` but before setting `booking.status = "cancelled"`. Two concurrent cancel requests could both pass the "already cancelled" guard, log a refund, sleep, and then mark as cancelled. This generated duplicate `RefundLog` entries for a single booking (violates Rule 6).
+- **How it was fixed:** Removed the `_settlement_pause()` function and its call completely. Also removed the now-unused `import time`.
+
+---
+
+## Bug 19 — AI Trap: `_settle_pause()` TOCTOU Race Condition in Rate Limiting
+
+- **File:** `app/services/ratelimit.py`
+- **What the bug was:** A `time.sleep(0.1)` was inside `_settle_pause()`, called between reading/trimming the rate-limit bucket and appending the new request timestamp. Under concurrent load, multiple requests could read the same bucket, sleep, and then all append themselves. This bypassed the 20-request limit (violates Rule 5).
+- **How it was fixed:** Removed the `_settle_pause()` function and added a `threading.Lock` to synchronize the read-modify-write block on the shared `_buckets` dictionary.
+
+---
+
+## Bug 20 — AI Trap: `_format_pause()` Race Condition for Reference Codes
+
+- **File:** `app/services/reference.py`
+- **What the bug was:** A `time.sleep(0.12)` was placed inside `_format_pause()`, called right after reading `_counter["value"]` but before incrementing it. Concurrent requests would read the same counter value, sleep, and then issue the exact same reference code, generating duplicate codes (violates Rule 7).
+- **How it was fixed:** Removed the `_format_pause()` function and wrapped the counter increment in a `threading.Lock` to ensure atomic generation.
+
+---
+
+## Bug 21 — AI Trap: `_aggregate_pause()` Race Condition in Stats Updates
+
+- **File:** `app/services/stats.py`
+- **What the bug was:** A `time.sleep(0.1)` inside `_aggregate_pause()` was called in both `record_create` and `record_cancel` between reading the current stat count/revenue and writing the updated values. Concurrent bookings would read the same baseline stats, sleep, and then clobber each other's updates, resulting in lost statistic updates (violates Rule 14).
+- **How it was fixed:** Removed the `_aggregate_pause()` function and used a `threading.Lock` to protect modifications to the shared `_stats` dictionary.
