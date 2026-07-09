@@ -1,9 +1,10 @@
 """CoWork API application entrypoint."""
 from fastapi import FastAPI
 
-from .database import Base, engine
+from .database import Base, SessionLocal, engine
 from .errors import AppError, app_error_handler
 from .routers import admin, auth, bookings, health, rooms
+from .services import reference, stats
 
 Base.metadata.create_all(bind=engine)
 
@@ -16,3 +17,13 @@ app.include_router(auth.router)
 app.include_router(rooms.router)
 app.include_router(bookings.router)
 app.include_router(admin.router)
+
+
+@app.on_event("startup")
+def rebuild_runtime_state() -> None:
+	db = SessionLocal()
+	try:
+		stats.rebuild_from_db(db)
+		reference.reseed_from_db(db)
+	finally:
+		db.close()

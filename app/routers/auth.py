@@ -1,14 +1,15 @@
 """Authentication endpoints: register, login, refresh, logout."""
 from fastapi import APIRouter, Depends
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import (
     create_access_token,
     create_refresh_token,
+    consume_refresh_token,
     decode_token,
     get_token_payload,
     hash_password,
-    is_token_revoked,
     revoke_access_token,
     verify_password,
 )
@@ -27,8 +28,16 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     if org is None:
         org = Organization(name=payload.org_name)
         db.add(org)
-        db.commit()
-        db.refresh(org)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            org = db.query(Organization).filter(Organization.name == payload.org_name).first()
+            if org is None:
+                raise
+            role = "member"
+        else:
+            db.refresh(org)
 
     existing = (
         db.query(User)
@@ -45,8 +54,20 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         role=role,
     )
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = (
+            db.query(User)
+            .filter(User.org_id == org.id, User.username == payload.username)
+            .first()
+        )
+        if existing is not None:
+            raise AppError(409, "USERNAME_TAKEN", "Username already taken in this organization")
+        raise
+    else:
+        db.refresh(user)
     return {
         "user_id": user.id,
         "org_id": org.id,
@@ -79,13 +100,11 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     data = decode_token(payload.refresh_token)
     if data.get("type") != "refresh":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
-    if is_token_revoked(data["jti"]):
+    if not consume_refresh_token(data["jti"]):
         raise AppError(401, "UNAUTHORIZED", "Refresh token has already been used")
     user = db.query(User).filter(User.id == int(data["sub"])).first()
     if user is None:
         raise AppError(401, "UNAUTHORIZED", "Unknown user")
-    # Invalidate this refresh token before issuing new tokens (single-use)
-    revoke_access_token(data)
     return {
         "access_token": create_access_token(user),
         "refresh_token": create_refresh_token(user),

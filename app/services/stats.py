@@ -5,6 +5,11 @@ endpoint can serve them without re-aggregating the whole booking table.
 """
 import threading
 
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from ..models import Booking
+
 _stats: dict[int, dict] = {}
 _lock = threading.Lock()
 
@@ -25,3 +30,20 @@ def record_cancel(room_id: int, price_cents: int) -> None:
 
 def get(room_id: int) -> dict:
     return _stats.get(room_id, {"count": 0, "revenue": 0})
+
+
+def rebuild_from_db(db: Session) -> None:
+    with _lock:
+        _stats.clear()
+        rows = (
+            db.query(
+                Booking.room_id,
+                func.count(Booking.id),
+                func.coalesce(func.sum(Booking.price_cents), 0),
+            )
+            .filter(Booking.status == "confirmed")
+            .group_by(Booking.room_id)
+            .all()
+        )
+        for room_id, count, revenue in rows:
+            _stats[room_id] = {"count": int(count), "revenue": int(revenue)}

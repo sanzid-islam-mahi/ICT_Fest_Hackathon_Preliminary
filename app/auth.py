@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import os
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -22,6 +23,7 @@ from .models import User
 # Access tokens presented to /auth/logout are recorded here so they can no
 # longer be used.
 _revoked_tokens: set[str] = set()
+_revoked_tokens_lock = threading.Lock()
 
 _PBKDF2_ROUNDS = 100_000
 
@@ -83,11 +85,21 @@ def decode_token(token: str) -> dict:
 
 
 def revoke_access_token(payload: dict) -> None:
-    _revoked_tokens.add(payload["jti"])
+    with _revoked_tokens_lock:
+        _revoked_tokens.add(payload["jti"])
 
 
 def is_token_revoked(jti: str) -> bool:
-    return jti in _revoked_tokens
+    with _revoked_tokens_lock:
+        return jti in _revoked_tokens
+
+
+def consume_refresh_token(jti: str) -> bool:
+    with _revoked_tokens_lock:
+        if jti in _revoked_tokens:
+            return False
+        _revoked_tokens.add(jti)
+        return True
 
 
 def get_token_payload(request: Request) -> dict:
@@ -98,7 +110,7 @@ def get_token_payload(request: Request) -> dict:
     payload = decode_token(token)
     if payload.get("type") != "access":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
-    if payload.get("jti") in _revoked_tokens:
+    if is_token_revoked(payload["jti"]):
         raise AppError(401, "UNAUTHORIZED", "Token has been revoked")
     return payload
 

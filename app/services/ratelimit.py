@@ -17,7 +17,7 @@ def record_and_check(user_id: int) -> None:
         bucket = _buckets.get(user_id, [])
         bucket = [t for t in bucket if t > now - _WINDOW_SECONDS]
         bucket.append(now)
+        if len(bucket) > _MAX_REQUESTS:
+            _buckets[user_id] = bucket
+            raise AppError(429, "RATE_LIMITED", "Too many booking requests")
         _buckets[user_id] = bucket
-        
-    if len(bucket) > _MAX_REQUESTS:
-        raise AppError(429, "RATE_LIMITED", "Too many booking requests")

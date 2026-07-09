@@ -293,3 +293,80 @@
 - **File:** `app/services/stats.py`
 - **What the bug was:** A `time.sleep(0.1)` inside `_aggregate_pause()` was called in both `record_create` and `record_cancel` between reading the current stat count/revenue and writing the updated values. Concurrent bookings would read the same baseline stats, sleep, and then clobber each other's updates, resulting in lost statistic updates (violates Rule 14).
 - **How it was fixed:** Removed the `_aggregate_pause()` function and used a `threading.Lock` to protect modifications to the shared `_stats` dictionary.
+
+---
+
+## Additional Fixes Implemented in This Pass
+
+These fixes were added after the earlier bug sweep to close security, tenant-isolation, and code-level concurrency gaps that were still present in the repository.
+
+## Bug 22 — JWT Secret Was a Repository-Known Default
+
+- **File:** `app/config.py`
+- **What the bug was:** The JWT signing secret defaulted to a hardcoded development string. That meant anyone with the repository could forge access and refresh tokens in the default runtime path.
+- **How it was fixed:** Changed the fallback to generate a fresh random secret when `JWT_SECRET` is not supplied by the environment.
+
+---
+
+## Bug 23 — Refresh Token Reuse and Logout Revocation Were Only Partially Enforced
+
+- **Files:** `app/auth.py`, `app/routers/auth.py`
+- **What the bug was:** Token revocation lived only in memory, and refresh tokens were not consumed atomically on use. A reused refresh token could still mint new tokens, and concurrent refreshes could race.
+- **How it was fixed:** Added a lock-protected revocation set, a single-use `consume_refresh_token()` helper, and switched the refresh endpoint to consume the presented refresh token before issuing a replacement pair.
+
+---
+
+## Bug 24 — Registration Had a Race Between Org/User Lookup and Commit
+
+- **File:** `app/routers/auth.py`
+- **What the bug was:** Concurrent registration requests could both decide that an org or username was available and then collide at commit time, producing an unhandled integrity failure or the wrong role assignment for the loser.
+- **How it was fixed:** Wrapped the commit path in `IntegrityError` handling, retried the organization lookup on conflict, and forced the concurrent loser into `member` role when the org already existed.
+
+---
+
+## Bug 25 — Members Could Read Other Members' Bookings in the Same Org
+
+- **File:** `app/routers/bookings.py`
+- **What the bug was:** `GET /bookings/{id}` only checked the org boundary, so a member could read another member's booking inside the same organization.
+- **How it was fixed:** Added the same owner-or-admin visibility guard used by cancel so member reads now return `404 BOOKING NOT FOUND` for another user's booking.
+
+---
+
+## Bug 26 — Admin Export Could Leak Cross-Org Bookings
+
+- **Files:** `app/services/export.py`, `app/routers/admin.py`
+- **What the bug was:** The `include_all=true&room_id=...` export path bypassed org scoping and queried by room ID only, so an admin could export another tenant's bookings by guessing a room ID.
+- **How it was fixed:** Scoped the raw export query by both `org_id` and `room_id`, so guessed cross-org room IDs no longer return data.
+
+---
+
+## Bug 27 — Usage Report Cache Was Not Invalidated on Booking Create or Room Create
+
+- **Files:** `app/routers/bookings.py`, `app/routers/rooms.py`
+- **What the bug was:** The usage report cache could remain stale after new bookings or new rooms were created, so repeated reads could miss current data until some unrelated invalidation happened.
+- **How it was fixed:** Added report-cache invalidation after booking creation and room creation so `GET /admin/usage-report` reflects current state more promptly.
+
+---
+
+## Bug 28 — Notification Locks Were Acquired in Opposite Orders
+
+- **File:** `app/services/notifications.py`
+- **What the bug was:** `notify_created()` acquired the email lock before the audit lock, while `notify_cancelled()` did the reverse. Mixed create/cancel traffic could deadlock request threads.
+- **How it was fixed:** Standardized the lock order so both notification paths acquire the locks in the same sequence.
+
+---
+
+## Bug 29 — Restarted Processes Lost Live Stats and Reference-Code State
+
+- **Files:** `app/main.py`, `app/services/stats.py`, `app/services/reference.py`
+- **What the bug was:** Room stats and booking reference codes were stored only in process memory. After a restart, stats dropped to zero and reference codes could repeat values that already existed in the database.
+- **How it was fixed:** Added startup rebuild hooks that repopulate live stats and reseed the reference counter from persisted bookings.
+- **Note:** This is a code-only mitigation for a process-local design; it improves restart safety without changing the database schema, but it still does not make these values shared across multiple workers.
+
+---
+
+## Bug 30 — Rate Limit Threshold Check Was Outside the Lock
+
+- **File:** `app/services/ratelimit.py`
+- **What the bug was:** The request bucket was trimmed and appended inside `with _lock:`, but the `len(bucket) > _MAX_REQUESTS` rejection check happened after leaving the critical section. Under concurrent load, multiple requests could all append before any of them observed the limit, weakening the 20-request cap.
+- **How it was fixed:** Moved the length check inside the locked section so the append and threshold test happen atomically for each user.
