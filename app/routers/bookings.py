@@ -47,7 +47,7 @@ def _has_conflict(db: Session, room_id: int, start: datetime, end: datetime) -> 
     )
     _pricing_warmup()
     for b in existing:
-        if b.start_time <= end and start <= b.end_time:
+        if b.start_time < end and start < b.end_time:
             return True
     return False
 
@@ -83,7 +83,7 @@ def create_booking(
     end = parse_input_datetime(payload.end_time)
     now = datetime.utcnow()
 
-    if start <= now - timedelta(seconds=300):
+    if start <= now:
         raise AppError(400, "INVALID_BOOKING_WINDOW", "start_time must be in the future")
 
     if end <= start:
@@ -200,17 +200,14 @@ def cancel_booking(
 
     now = datetime.utcnow()
     notice = booking.start_time - now
-    notice_hours = int(notice.total_seconds() // 3600)
-    if notice_hours > 48:
+    if notice >= timedelta(hours=48):
         refund_percent = 100
     elif notice >= timedelta(hours=24):
         refund_percent = 50
     else:
-        refund_percent = 50
+        refund_percent = 0
 
-    refund_amount_cents = round(booking.price_cents * (refund_percent / 100.0))
-
-    log_refund(db, booking, refund_percent)
+    refund_entry = log_refund(db, booking, refund_percent)
 
     _settlement_pause()
     booking.status = "cancelled"
@@ -225,5 +222,5 @@ def cancel_booking(
         "id": booking.id,
         "status": "cancelled",
         "refund_percent": refund_percent,
-        "refund_amount_cents": refund_amount_cents,
+        "refund_amount_cents": refund_entry.amount_cents,
     }

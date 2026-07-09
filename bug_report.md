@@ -120,4 +120,99 @@
   notifications.notify_cancelled(booking)
 ```
 
+---
 
+## Bug 10 — `start_time` Past-Check Has a 5-Minute Grace Window
+
+- **File:** `app/routers/bookings.py`, line 86
+- **What the bug was:** The spec (Rule 2) states: "start_time must be strictly in the future at request time — no grace window." The code checked `start <= now - timedelta(seconds=300)`, which only rejected start times more than 5 minutes in the past. A booking with `start_time` equal to `now`, or up to 5 minutes in the past, would pass validation and be committed to the database.
+- **How it was fixed:** Changed the condition to `start <= now` so any start time that is not strictly in the future is rejected immediately.
+
+```diff
+- if start <= now - timedelta(seconds=300):
++ if start <= now:
+      raise AppError(400, "INVALID_BOOKING_WINDOW", "start_time must be in the future")
+```
+
+---
+
+## Bug 11 — `_has_conflict` Overlap Condition Uses `<=` Instead of `<`
+
+- **File:** `app/routers/bookings.py`, line 50
+- **What the bug was:** The spec (Rule 3) defines overlap as `existing.start < new.end AND new.start < existing.end` — strict less-than on both sides, meaning **back-to-back bookings are allowed**. The code used `<=` on both sides: `b.start_time <= end and start <= b.end_time`. This caused a booking from 2–3 PM to block a new booking starting exactly at 3 PM, returning a false 409 ROOM_CONFLICT.
+- **How it was fixed:** Changed both `<=` comparisons to strict `<`.
+
+```diff
+- if b.start_time <= end and start <= b.end_time:
++ if b.start_time < end and start < b.end_time:
+```
+
+---
+
+## Bug 12 — Refund 48h Boundary Uses Integer Truncation (`notice_hours > 48` instead of `>= 48`)
+
+- **File:** `app/routers/bookings.py`, line 203
+- **What the bug was:** The spec (Rule 6) says notice ≥ 48 hours → 100% refund. The code computed `notice_hours = int(notice.total_seconds() // 3600)` (integer floor) and checked `notice_hours > 48` (strictly greater). This means exactly 48 hours of notice got 50% instead of 100%, and e.g. 48h 59m also floored to 48 and fell through to the 50% branch. Both the flooring and the strict `>` were wrong.
+- **How it was fixed:** Replaced the integer computation with a direct `timedelta` comparison: `if notice >= timedelta(hours=48)`.
+
+```diff
+- notice_hours = int(notice.total_seconds() // 3600)
+- if notice_hours > 48:
++ if notice >= timedelta(hours=48):
+      refund_percent = 100
+```
+
+---
+
+## Bug 13 — Refund for Notice < 24h Returns 50% Instead of 0%
+
+- **File:** `app/routers/bookings.py`, line 208
+- **What the bug was:** The spec (Rule 6) states: notice < 24 hours → 0% refund. The `else` branch (covering notice < 24h) incorrectly set `refund_percent = 50`. Cancelling a booking with less than 24 hours notice gave the member a 50% refund instead of nothing.
+- **How it was fixed:** Changed `refund_percent = 50` to `refund_percent = 0` in the `else` branch.
+
+```diff
+  else:
+-     refund_percent = 50
++     refund_percent = 0
+```
+
+---
+
+## Bug 14 — Refund Amount Truncated with `int()` and Mismatches Cancel Response
+
+- **Files:** `app/services/refunds.py` lines 15–17; `app/routers/bookings.py` line 210
+- **What the bug was (part 1 — wrong rounding):** `log_refund` computed the refund amount as:
+  ```python
+  dollars = booking.price_cents / 100.0
+  refund_dollars = dollars * (percent / 100.0)
+  amount_cents = int(refund_dollars * 100)  # truncates toward zero
+  ```
+  `int()` truncates (floors toward zero), not rounds-half-up. The spec (Rule 6) requires: *"Refund amount rounds to the nearest cent, half-cents rounding up."* For example, 50% of 101 cents = 50.5 cents → `int()` gives 50, but the spec requires 51.
+
+- **What the bug was (part 2 — mismatch):** `cancel_booking` independently calculated `refund_amount_cents = round(booking.price_cents * (refund_percent / 100.0))`, while `log_refund` used `int()`. These two formulas can produce different values. The spec says: *"the amount returned by the cancel response must equal the amount stored in the RefundLog."*
+
+- **How it was fixed:**
+  1. Replaced `int()` in `log_refund` with `Decimal` arithmetic and `ROUND_HALF_UP` to match the spec exactly.
+  2. Removed the independent `refund_amount_cents` calculation in `cancel_booking`. Instead, `log_refund` now returns the entry, and the cancel response uses `refund_entry.amount_cents` — a single source of truth.
+
+```diff
+# app/services/refunds.py
++from decimal import ROUND_HALF_UP, Decimal
+ 
+ def log_refund(db, booking, percent):
+-    dollars = booking.price_cents / 100.0
+-    refund_dollars = dollars * (percent / 100.0)
+-    amount_cents = int(refund_dollars * 100)
++    amount_cents = int(
++        (Decimal(booking.price_cents) * Decimal(percent) / Decimal(100))
++        .quantize(Decimal("1"), rounding=ROUND_HALF_UP)
++    )
+
+# app/routers/bookings.py
+-    refund_amount_cents = round(booking.price_cents * (refund_percent / 100.0))
+-    log_refund(db, booking, refund_percent)
++    refund_entry = log_refund(db, booking, refund_percent)
+     ...
+-    "refund_amount_cents": refund_amount_cents,
++    "refund_amount_cents": refund_entry.amount_cents,
+```
