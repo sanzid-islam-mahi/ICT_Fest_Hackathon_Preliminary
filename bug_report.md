@@ -74,4 +74,50 @@
 
 **Fix:** Replaced the `return` block with `raise AppError(409, "USERNAME_TAKEN", "Username already taken in this organization")`.
 
+---
+
+## Bug 7 — Pagination Limit Hardcoded to 10
+
+- **File:** `app/routers/bookings.py`, line 139
+- **What the bug was:** The `list_bookings` endpoint accepts a `limit` query parameter (default 10, max 100), but the actual SQL query had `.limit(10)` hardcoded instead of using the user-provided `limit` variable. So requesting `?limit=50` still only returned 10 items.
+- **How it was fixed:** Changed `.limit(10)` to `.limit(limit)`.
+
+```diff
+- .limit(10)
++ .limit(limit)
+```
+
+---
+
+## Bug 8 — Missing Minimum Duration and `end <= start` Validation
+
+- **File:** `app/routers/bookings.py`, lines 89-94
+- **What the bug was:** The spec (Rule 2) requires: duration is a whole number of hours, minimum 1, maximum 8, and `end_time` must be strictly after `start_time`. The code only checked that duration is a whole number and that it doesn't exceed 8. It never rejected `end <= start` (zero or negative duration) and never checked `duration < 1`. A booking with `end_time == start_time` (0 hours) or `end_time` before `start_time` would pass validation.
+- **How it was fixed:** Added an explicit `end <= start` check that returns 400, and changed the range check to `duration_hours < 1 or duration_hours > 8`.
+
+```diff
++ if end <= start:
++     raise AppError(400, "INVALID_BOOKING_WINDOW", "end_time must be after start_time")
++
+  duration_hours = (end - start).total_seconds() / 3600
+  ...
+- if duration_hours > MAX_DURATION_HOURS:
++ if duration_hours < MIN_DURATION_HOURS or duration_hours > MAX_DURATION_HOURS:
+      raise AppError(400, "INVALID_BOOKING_WINDOW", "duration out of range")
+```
+
+---
+
+## Bug 9 — Availability Cache Not Invalidated on Cancel
+
+- **File:** `app/routers/bookings.py`, line 217
+- **What the bug was:** When a booking is created, `cache.invalidate_availability(room.id, ...)` is correctly called. But when a booking is cancelled, only `cache.invalidate_report()` is called — availability cache is never cleared. The spec (Rule 13) says availability must "reflect the current state immediately." After cancellation, `GET /rooms/{id}/availability` could still show the cancelled booking as a busy slot until the cache expired or the server restarted.
+- **How it was fixed:** Added `cache.invalidate_availability(booking.room_id, booking.start_time.date().isoformat())` after cancel.
+
+```diff
+  cache.invalidate_report(user.org_id)
++ cache.invalidate_availability(booking.room_id, booking.start_time.date().isoformat())
+  notifications.notify_cancelled(booking)
+```
+
 
