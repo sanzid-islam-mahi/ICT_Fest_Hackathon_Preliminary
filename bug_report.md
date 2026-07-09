@@ -216,3 +216,32 @@
 -    "refund_amount_cents": refund_amount_cents,
 +    "refund_amount_cents": refund_entry.amount_cents,
 ```
+
+---
+
+## Bug 15 — Refresh Token Not Invalidated on Use (Single-Use Not Enforced)
+
+- **File:** `app/routers/auth.py`, lines 76–88; `app/auth.py`
+- **What the bug was:** The spec (Rule 8) requires refresh tokens to be **single-use**: using a refresh token must invalidate it, and any reuse must return 401. The `/auth/refresh` endpoint called `decode_token()` (which only checks JWT signature and expiry) but never added the presented refresh token's `jti` to `_revoked_tokens`. The same refresh token could be used unlimited times — anyone who intercepted a refresh token had permanent account access until expiry (7 days).
+- **How it was fixed:**
+  1. Added `is_token_revoked(jti)` to `app/auth.py` to expose a public revocation check.
+  2. In the refresh endpoint, check if the token's `jti` is already revoked — if so, raise 401. Then call `revoke_access_token(data)` to invalidate the presented refresh token **before** returning the new token pair.
+
+```diff
+# app/auth.py
++def is_token_revoked(jti: str) -> bool:
++    return jti in _revoked_tokens
+
+# app/routers/auth.py
++from ..auth import is_token_revoked, revoke_access_token, ...
+
+ def refresh(payload, db):
+     data = decode_token(payload.refresh_token)
+     if data.get("type") != "refresh":
+         raise AppError(401, ...)
++    if is_token_revoked(data["jti"]):
++        raise AppError(401, "UNAUTHORIZED", "Refresh token has already been used")
+     user = db.query(User)...
++    revoke_access_token(data)   # invalidate before returning new tokens
+     return { "access_token": ..., "refresh_token": ..., ... }
+```
